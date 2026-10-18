@@ -1,0 +1,17 @@
+Original touchHLE revision: ca1de89c578e79746f33c1332e28efd106c334ba
+Upstream: https://github.com/touchHLE/touchHLE
+Native submodules are included as ordinary source directories.
+Git metadata was intentionally omitted. Do not run git submodule update here.
+
+vendor/SDL
+  URL: https://github.com/libsdl-org/SDL.git
+  Revision: 07d0f51fa292895443f563f0cbde4cb3802d87fa
+vendor/dynarmic
+  URL: https://github.com/touchHLE/dynarmic.git
+  Revision: e0f6bd9d0b48ed6e536672c0c9abbe87961be861
+vendor/openal-soft
+  URL: https://github.com/kcat/openal-soft
+  Revision: 23c8a35505fe6ab7a5c87754911a133b23ac75cf
+vendor/stb
+  URL: https://github.com/nothings/stb.git
+  Revision: 9f1776a36d2a3d63c52f705c3a84b372cfed4340

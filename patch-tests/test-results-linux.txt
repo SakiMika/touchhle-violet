@@ -1,0 +1,12 @@
+
+running 7 tests
+test tests::exports_include_missing_api_and_companion_functions ... ok
+test tests::bitmap_format_transform_and_balanced_ownership ... ok
+test tests::nested_contexts_restore_previous_context ... ok
+test tests::no_image_context_returns_nil_without_popping ... ok
+test tests::snapshots_survive_end_and_do_not_alias_bitmap ... ok
+test tests::temporary_push_preserves_image_context ... ok
+test ui_graphics::tests::image_context_sizes ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

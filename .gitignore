@@ -1,0 +1,51 @@
+/target
+/vendor/boost
+/touchHLE_sandbox
+/touchHLE_apps
+touchHLE_log.txt
+touchHLE_wallpaper.*
+
+# Android
+
+*.iml
+.gradle
+/local.properties
+.idea/
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+android/app/src/main/jniLibs
+android/app/build
+android/build
+
+# macOS
+
+.DS_Store
+
+# Default developer dump file
+
+DUMP.txt
+
+# Vendored source snapshot: track all included native library files.
+!/vendor/SDL/
+!/vendor/SDL/**
+!/vendor/dynarmic/
+!/vendor/dynarmic/**
+!/vendor/openal-soft/
+!/vendor/openal-soft/**
+!/vendor/stb/
+!/vendor/stb/**
+
+# Build-only downloads and local test outputs.
+/boost.7z
+/cmake.zip
+/vendor/cmake/
+/patch-tests/*.exe
+/dev-scripts/touchHLE_windows_bundle/
+
+# Include the bundled instructions, but never commit personal game files.
+!/touchHLE_apps/
+/touchHLE_apps/*
+!/touchHLE_apps/README.txt

@@ -1,0 +1,182 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+//! `UIGraphics.h`
+
+use crate::dyld::{export_c_func, FunctionExports};
+use crate::frameworks::core_graphics::cg_bitmap_context::{
+    CGBitmapContextCreate, CGBitmapContextCreateImage,
+};
+use crate::frameworks::core_graphics::cg_color_space::{
+    CGColorSpaceCreateDeviceRGB, CGColorSpaceRelease,
+};
+use crate::frameworks::core_graphics::cg_context::{
+    CGContextRef, CGContextRelease, CGContextRetain, CGContextScaleCTM, CGContextTranslateCTM,
+};
+use crate::frameworks::core_graphics::cg_image::{
+    kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big, CGImageRelease,
+};
+use crate::frameworks::core_graphics::CGSize;
+use crate::mem::{GuestUSize, Ptr};
+use crate::objc::{id, msg_class, nil};
+use crate::Environment;
+
+struct ContextEntry {
+    context: CGContextRef,
+    is_image_context: bool,
+}
+
+#[derive(Default)]
+pub(super) struct State {
+    context_stack: Vec<ContextEntry>,
+}
+
+pub fn UIGraphicsPushContext(env: &mut Environment, context: CGContextRef) {
+    CGContextRetain(env, context);
+    env.framework_state
+        .uikit
+        .ui_graphics
+        .context_stack
+        .push(ContextEntry {
+            context,
+            is_image_context: false,
+        });
+}
+pub fn UIGraphicsPopContext(env: &mut Environment) {
+    let entry = env.framework_state.uikit.ui_graphics.context_stack.pop();
+    CGContextRelease(env, entry.unwrap().context);
+}
+pub fn UIGraphicsGetCurrentContext(env: &mut Environment) -> CGContextRef {
+    env.framework_state
+        .uikit
+        .ui_graphics
+        .context_stack
+        .last()
+        .map(|entry| entry.context)
+        .unwrap_or(nil)
+}
+
+// Validate before converting floats or allocating in the 32-bit guest heap.
+fn image_context_dimensions(size: CGSize) -> Option<(GuestUSize, GuestUSize, GuestUSize)> {
+    if !size.width.is_finite()
+        || !size.height.is_finite()
+        || size.width <= 0.0
+        || size.height <= 0.0
+    {
+        return None;
+    }
+    let width = (size.width as f64).ceil();
+    let height = (size.height as f64).ceil();
+    if width > GuestUSize::MAX as f64 || height > GuestUSize::MAX as f64 {
+        return None;
+    }
+    let (width, height) = (width as GuestUSize, height as GuestUSize);
+    let bytes_per_row = width.checked_mul(4)?;
+    bytes_per_row.checked_mul(height)?;
+    Some((width, height, bytes_per_row))
+}
+
+pub fn UIGraphicsBeginImageContext(env: &mut Environment, size: CGSize) {
+    // The legacy API uses scale 1.0 and a transparent RGBA bitmap.
+    let (width, height, bytes_per_row) = image_context_dimensions(size)
+        .expect("UIGraphicsBeginImageContext: invalid or oversized bitmap dimensions");
+    let color_space = CGColorSpaceCreateDeviceRGB(env);
+    let context = CGBitmapContextCreate(
+        env,
+        Ptr::null(),
+        width,
+        height,
+        8,
+        bytes_per_row,
+        color_space,
+        kCGImageByteOrder32Big | kCGImageAlphaPremultipliedLast,
+    );
+    CGColorSpaceRelease(env, color_space);
+
+    // UIKit has a top-left origin; Core Graphics defaults to bottom-left.
+    CGContextTranslateCTM(env, context, 0.0, height as _);
+    CGContextScaleCTM(env, context, 1.0, -1.0);
+
+    UIGraphicsPushContext(env, context);
+    env.framework_state
+        .uikit
+        .ui_graphics
+        .context_stack
+        .last_mut()
+        .unwrap()
+        .is_image_context = true;
+    // The stack now owns the remaining reference.
+    CGContextRelease(env, context);
+}
+
+pub fn UIGraphicsGetImageFromCurrentImageContext(env: &mut Environment) -> id {
+    let Some(entry) = env.framework_state.uikit.ui_graphics.context_stack.last() else {
+        return nil;
+    };
+    if !entry.is_image_context {
+        return nil;
+    }
+    let context = entry.context;
+    // CreateImage copies the pixels, so the UIImage survives EndImageContext.
+    let image = CGBitmapContextCreateImage(env, context);
+    let result: id = msg_class![env; UIImage imageWithCGImage:image];
+    CGImageRelease(env, image);
+    result
+}
+
+pub fn UIGraphicsEndImageContext(env: &mut Environment) {
+    let is_image_context = env
+        .framework_state
+        .uikit
+        .ui_graphics
+        .context_stack
+        .last()
+        .is_some_and(|entry| entry.is_image_context);
+    if is_image_context {
+        UIGraphicsPopContext(env);
+    }
+}
+
+pub const FUNCTIONS: FunctionExports = &[
+    export_c_func!(UIGraphicsPushContext(_)),
+    export_c_func!(UIGraphicsPopContext()),
+    export_c_func!(UIGraphicsGetCurrentContext()),
+    export_c_func!(UIGraphicsBeginImageContext(_)),
+    export_c_func!(UIGraphicsGetImageFromCurrentImageContext()),
+    export_c_func!(UIGraphicsEndImageContext()),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_context_sizes() {
+        for (width, height, expected) in [
+            (320.0, 480.0, Some((320, 480, 1280))),
+            (1.25, 2.5, Some((2, 3, 8))),
+            (0.25, 0.25, Some((1, 1, 4))),
+            (0.0, 1.0, None),
+            (1.0, 0.0, None),
+            (-1.0, 1.0, None),
+            (1.0, -1.0, None),
+            (f32::NAN, 1.0, None),
+            (1.0, f32::NAN, None),
+            (f32::INFINITY, 1.0, None),
+            (1.0, f32::INFINITY, None),
+            (f32::NEG_INFINITY, 1.0, None),
+            (f32::MAX, 1.0, None),
+            (1.0, f32::MAX, None),
+            (1_073_741_824.0, 1.0, None),
+            (65536.0, 65536.0, None),
+        ] {
+            assert_eq!(
+                image_context_dimensions(CGSize { width, height }),
+                expected,
+                "size: {width} x {height}"
+            );
+        }
+    }
+}

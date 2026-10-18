@@ -1,0 +1,102 @@
+name: Build Violet Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Enable long source paths
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+
+      - name: Verify included source dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            'vendor/SDL/CMakeLists.txt',
+            'vendor/dynarmic/CMakeLists.txt',
+            'vendor/dynarmic/externals/fmt/CMakeLists.txt',
+            'vendor/dynarmic/externals/zycore/CMakeLists.txt',
+            'vendor/openal-soft/CMakeLists.txt',
+            'vendor/stb/stb_image.h',
+            'src/frameworks/uikit/ui_graphics.rs'
+          )
+          foreach ($path in $required) {
+            if (!(Test-Path $path)) { throw "Missing source file: $path. Upload the whole source package." }
+          }
+
+      - name: Prepare Rust for Windows MSVC
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default stable-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+          cargo --version
+
+      - name: Download Boost and CMake
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe --fail --location --retry 3 -o boost.7z https://archives.boost.io/release/1.81.0/source/boost_1_81_0.7z
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          7z x boost.7z -ovendor -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Move-Item vendor/boost_1_81_0 vendor/boost
+          curl.exe --fail --location --retry 3 -o cmake.zip https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-windows-x86_64.zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          7z x cmake.zip -ovendor -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Move-Item vendor/cmake-3.31.6-windows-x86_64 vendor/cmake
+
+      - name: Run standalone patch logic tests
+        shell: pwsh
+        run: |
+          rustc --edition 2021 --test patch-tests/ui_graphics_harness.rs -o patch-tests/ui_graphics_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./patch-tests/ui_graphics_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Windows x64 executable
+        shell: pwsh
+        run: |
+          $env:CMAKE = "$env:GITHUB_WORKSPACE\vendor\cmake\bin\cmake.exe"
+          & $env:CMAKE --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Bundle executable and runtime files
+        shell: bash
+        working-directory: dev-scripts
+        run: |
+          set -euo pipefail
+          ./make-windows-bundle.sh ../target/x86_64-pc-windows-msvc/release/touchHLE.exe
+          cp ../LICENSE touchHLE_windows_bundle/
+          cp ../VIOLET_BUILD_README_VI.md touchHLE_windows_bundle/
+          cp ../VENDORED_DEPENDENCIES.txt touchHLE_windows_bundle/
+          cp ../ragnarok-violet-uigraphics.patch touchHLE_windows_bundle/
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: touchHLE-Violet-Windows-x64
+          path: dev-scripts/touchHLE_windows_bundle/
+          if-no-files-found: error
+          retention-days: 7
