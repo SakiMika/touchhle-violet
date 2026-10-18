@@ -1,0 +1,636 @@
+--- a/src/frameworks/uikit/ui_graphics.rs
++++ b/src/frameworks/uikit/ui_graphics.rs
+@@ -6,15 +6,31 @@
+ //! `UIGraphics.h`
+ 
+ use crate::dyld::{export_c_func, FunctionExports};
++use crate::frameworks::core_graphics::cg_bitmap_context::{
++    CGBitmapContextCreate, CGBitmapContextCreateImage,
++};
++use crate::frameworks::core_graphics::cg_color_space::{
++    CGColorSpaceCreateDeviceRGB, CGColorSpaceRelease,
++};
+ use crate::frameworks::core_graphics::cg_context::{
+-    CGContextRef, CGContextRelease, CGContextRetain,
++    CGContextRef, CGContextRelease, CGContextRetain, CGContextScaleCTM, CGContextTranslateCTM,
+ };
+-use crate::objc::nil;
++use crate::frameworks::core_graphics::cg_image::{
++    kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big, CGImageRelease,
++};
++use crate::frameworks::core_graphics::CGSize;
++use crate::mem::{GuestUSize, Ptr};
++use crate::objc::{id, msg_class, nil};
+ use crate::Environment;
++
++struct ContextEntry {
++    context: CGContextRef,
++    is_image_context: bool,
++}
+ 
+ #[derive(Default)]
+ pub(super) struct State {
+-    pub(super) context_stack: Vec<CGContextRef>,
++    context_stack: Vec<ContextEntry>,
+ }
+ 
+ pub fn UIGraphicsPushContext(env: &mut Environment, context: CGContextRef) {
+@@ -23,11 +39,14 @@
+         .uikit
+         .ui_graphics
+         .context_stack
+-        .push(context);
++        .push(ContextEntry {
++            context,
++            is_image_context: false,
++        });
+ }
+ pub fn UIGraphicsPopContext(env: &mut Environment) {
+-    let context = env.framework_state.uikit.ui_graphics.context_stack.pop();
+-    CGContextRelease(env, context.unwrap());
++    let entry = env.framework_state.uikit.ui_graphics.context_stack.pop();
++    CGContextRelease(env, entry.unwrap().context);
+ }
+ pub fn UIGraphicsGetCurrentContext(env: &mut Environment) -> CGContextRef {
+     env.framework_state
+@@ -35,12 +54,130 @@
+         .ui_graphics
+         .context_stack
+         .last()
+-        .copied()
++        .map(|entry| entry.context)
+         .unwrap_or(nil)
++}
++
++// Validate before converting floats or allocating in the 32-bit guest heap.
++fn image_context_dimensions(size: CGSize) -> Option<(GuestUSize, GuestUSize, GuestUSize)> {
++    if !size.width.is_finite()
++        || !size.height.is_finite()
++        || size.width <= 0.0
++        || size.height <= 0.0
++    {
++        return None;
++    }
++    let width = (size.width as f64).ceil();
++    let height = (size.height as f64).ceil();
++    if width > GuestUSize::MAX as f64 || height > GuestUSize::MAX as f64 {
++        return None;
++    }
++    let (width, height) = (width as GuestUSize, height as GuestUSize);
++    let bytes_per_row = width.checked_mul(4)?;
++    bytes_per_row.checked_mul(height)?;
++    Some((width, height, bytes_per_row))
++}
++
++pub fn UIGraphicsBeginImageContext(env: &mut Environment, size: CGSize) {
++    log!("UIGraphicsBeginImageContext({:?})", size);
++    // The legacy API uses scale 1.0 and a transparent RGBA bitmap.
++    let (width, height, bytes_per_row) = image_context_dimensions(size)
++        .expect("UIGraphicsBeginImageContext: invalid or oversized bitmap dimensions");
++    let color_space = CGColorSpaceCreateDeviceRGB(env);
++    let context = CGBitmapContextCreate(
++        env,
++        Ptr::null(),
++        width,
++        height,
++        8,
++        bytes_per_row,
++        color_space,
++        kCGImageByteOrder32Big | kCGImageAlphaPremultipliedLast,
++    );
++    CGColorSpaceRelease(env, color_space);
++
++    // UIKit has a top-left origin; Core Graphics defaults to bottom-left.
++    CGContextTranslateCTM(env, context, 0.0, height as _);
++    CGContextScaleCTM(env, context, 1.0, -1.0);
++
++    UIGraphicsPushContext(env, context);
++    env.framework_state
++        .uikit
++        .ui_graphics
++        .context_stack
++        .last_mut()
++        .unwrap()
++        .is_image_context = true;
++    // The stack now owns the remaining reference.
++    CGContextRelease(env, context);
++}
++
++pub fn UIGraphicsGetImageFromCurrentImageContext(env: &mut Environment) -> id {
++    let Some(entry) = env.framework_state.uikit.ui_graphics.context_stack.last() else {
++        return nil;
++    };
++    if !entry.is_image_context {
++        return nil;
++    }
++    let context = entry.context;
++    // CreateImage copies the pixels, so the UIImage survives EndImageContext.
++    let image = CGBitmapContextCreateImage(env, context);
++    let result: id = msg_class![env; UIImage imageWithCGImage:image];
++    CGImageRelease(env, image);
++    result
++}
++
++pub fn UIGraphicsEndImageContext(env: &mut Environment) {
++    let is_image_context = env
++        .framework_state
++        .uikit
++        .ui_graphics
++        .context_stack
++        .last()
++        .is_some_and(|entry| entry.is_image_context);
++    if is_image_context {
++        UIGraphicsPopContext(env);
++    }
+ }
+ 
+ pub const FUNCTIONS: FunctionExports = &[
+     export_c_func!(UIGraphicsPushContext(_)),
+     export_c_func!(UIGraphicsPopContext()),
+     export_c_func!(UIGraphicsGetCurrentContext()),
++    export_c_func!(UIGraphicsBeginImageContext(_)),
++    export_c_func!(UIGraphicsGetImageFromCurrentImageContext()),
++    export_c_func!(UIGraphicsEndImageContext()),
+ ];
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn image_context_sizes() {
++        for (width, height, expected) in [
++            (320.0, 480.0, Some((320, 480, 1280))),
++            (1.25, 2.5, Some((2, 3, 8))),
++            (0.25, 0.25, Some((1, 1, 4))),
++            (0.0, 1.0, None),
++            (1.0, 0.0, None),
++            (-1.0, 1.0, None),
++            (1.0, -1.0, None),
++            (f32::NAN, 1.0, None),
++            (1.0, f32::NAN, None),
++            (f32::INFINITY, 1.0, None),
++            (1.0, f32::INFINITY, None),
++            (f32::NEG_INFINITY, 1.0, None),
++            (f32::MAX, 1.0, None),
++            (1.0, f32::MAX, None),
++            (1_073_741_824.0, 1.0, None),
++            (65536.0, 65536.0, None),
++        ] {
++            assert_eq!(
++                image_context_dimensions(CGSize { width, height }),
++                expected,
++                "size: {width} x {height}"
++            );
++        }
++    }
++}
+--- a/src/frameworks/foundation/ns_locale.rs
++++ b/src/frameworks/foundation/ns_locale.rs
+@@ -27,7 +27,7 @@
+     ),
+     (
+         "_NSLocaleLanguageCode",
+-        HostConstant::NSString(NSLocaleIdentifier),
++        HostConstant::NSString(NSLocaleLanguageCode),
+     ),
+     (
+         "_NSLocaleIdentifier",
+@@ -84,8 +84,23 @@
+     country_code: id,
+     /// `NSString *`
+     language_code: id,
++    /// Original identifier for locales created with an explicit identifier.
++    identifier: id,
+ }
+ impl HostObject for NSLocaleHostObject {}
++
++// Read common language/script/region identifiers without assuming a length.
++// Preserve the complete input separately: this is not full ICU canonicalization.
++fn locale_identifier_components(identifier: &str) -> (String, Option<String>) {
++    let base = identifier.split(['@', '.']).next().unwrap_or_default();
++    let mut components = base.split(['_', '-']);
++    let language = components.next().unwrap_or_default().to_ascii_lowercase();
++    let country = components.find(|component| {
++        (component.len() == 2 && component.bytes().all(|byte| byte.is_ascii_alphabetic()))
++            || (component.len() == 3 && component.bytes().all(|byte| byte.is_ascii_digit()))
++    });
++    (language, country.map(str::to_ascii_uppercase))
++}
+ 
+ pub const CLASSES: ClassExports = objc_classes! {
+ 
+@@ -97,6 +112,7 @@
+     let host_object = Box::new(NSLocaleHostObject {
+         country_code: nil,
+         language_code: nil,
++        identifier: nil,
+     });
+     env.objc.alloc_object(this, host_object, &mut env.mem)
+ }
+@@ -128,6 +144,7 @@
+         let host_object = NSLocaleHostObject {
+             country_code,
+             language_code,
++            identifier: nil,
+         };
+         let new_locale = env.objc.alloc_object(
+             this,
+@@ -151,6 +168,7 @@
+             // Was confirmed on the iOS Simulator
+             country_code: nil,
+             language_code: nil,
++        identifier: nil,
+         };
+         let new_locale = env.objc.alloc_object(
+             this,
+@@ -167,21 +185,25 @@
+ - (id)initWithLocaleIdentifier:(id)string { // NSString *
+     let str = ns_string::to_rust_string(env, string);
+     log_dbg!("[(NSLocale *){:?} initWithLocaleIdentifier:'{}']", this, str);
++    let (language, country) = locale_identifier_components(&str);
++    let language_code = ns_string::from_rust_string(env, language);
++    let country_code = country
++        .map(|country| ns_string::from_rust_string(env, country))
++        .unwrap_or(nil);
+     retain(env, string);
+-    // Loosely assume 2-char lang code here
+-    // TODO: locale identifier parsing
+-    assert_eq!(2, str.len());
+-    assert!(str.to_lowercase().eq(&str));
+-    assert!(!str.contains('_') && !str.contains('-'));
+-    assert!(env.objc.borrow::<NSLocaleHostObject>(this).language_code == nil);
+-    env.objc.borrow_mut::<NSLocaleHostObject>(this).language_code = string;
++    let host_object = env.objc.borrow_mut::<NSLocaleHostObject>(this);
++    assert!(host_object.language_code == nil && host_object.identifier == nil);
++    host_object.language_code = language_code;
++    host_object.country_code = country_code;
++    host_object.identifier = string;
+     this
+ }
+ 
+ - (())dealloc {
+-    let &NSLocaleHostObject { country_code, language_code } = env.objc.borrow::<NSLocaleHostObject>(this);
++    let &NSLocaleHostObject { country_code, language_code, identifier } = env.objc.borrow::<NSLocaleHostObject>(this);
+     release(env, country_code);
+     release(env, language_code);
++    release(env, identifier);
+     env.objc.dealloc_object(this, &mut env.mem)
+ }
+ 
+@@ -207,14 +229,19 @@
+         },
+         // TODO: Define NSLocaleIdentifier _as_ kCFLocaleIdentifier
+         NSLocaleIdentifier | kCFLocaleIdentifier => {
+-            let &NSLocaleHostObject { country_code, language_code } = env.objc.borrow(this);
+-            assert!(country_code != nil); // TODO
+-            assert!(language_code != nil); // TODO
+-            let locale_id_str = format!(
+-                "{}_{}",
+-                ns_string::to_rust_string(env, language_code),
+-                ns_string::to_rust_string(env, country_code)
+-            );
++            let &NSLocaleHostObject { country_code, language_code, identifier } = env.objc.borrow(this);
++            if identifier != nil {
++                return identifier;
++            }
++            if language_code == nil {
++                return nil;
++            }
++            let language = ns_string::to_rust_string(env, language_code).into_owned();
++            let locale_id_str = if country_code == nil {
++                language
++            } else {
++                format!("{}_{}", language, ns_string::to_rust_string(env, country_code))
++            };
+             let res = ns_string::from_rust_string(env, locale_id_str);
+             autorelease(env, res)
+         },
+@@ -229,3 +256,31 @@
+ @end
+ 
+ };
++
++#[cfg(test)]
++mod tests {
++    use super::locale_identifier_components;
++
++    #[test]
++    fn locale_identifiers_with_regions() {
++        for (identifier, language, country) in [
++            ("en", "en", None),
++            ("en_US", "en", Some("US")),
++            ("ja_JP", "ja", Some("JP")),
++            ("vi-VN", "vi", Some("VN")),
++            ("EN_us", "en", Some("US")),
++            ("zh_Hans_CN", "zh", Some("CN")),
++            ("sr-Latn-RS", "sr", Some("RS")),
++            ("es_419", "es", Some("419")),
++            ("en_US.UTF-8", "en", Some("US")),
++            ("en_US@calendar=gregorian", "en", Some("US")),
++            ("", "", None),
++        ] {
++            assert_eq!(
++                locale_identifier_components(identifier),
++                (language.to_string(), country.map(str::to_string)),
++                "identifier: {identifier}"
++            );
++        }
++    }
++}
+--- a/src/frameworks/foundation/ns_date_formatter.rs
++++ b/src/frameworks/foundation/ns_date_formatter.rs
+@@ -9,16 +9,85 @@
+ //! - Apple's [Introduction to Data Formatting Programming Guide For Cocoa](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/DataFormatting/DataFormatting.html)
+ //! - [Unicode Technical Standard #35](https://unicode.org/reports/tr35/tr35-10.html#Date_Format_Patterns)
+ 
+-use crate::frameworks::core_foundation::time::CFAbsoluteTimeGetGregorianDate;
++use crate::frameworks::core_foundation::time::{CFAbsoluteTimeGetGregorianDate, CFGregorianDate};
+ use crate::frameworks::foundation::{ns_string, NSTimeInterval};
+ use crate::objc::{
+-    autorelease, id, msg, nil, objc_classes, todo_objc_setter, ClassExports, HostObject, NSZonePtr,
++    autorelease, id, msg, msg_class, nil, objc_classes, release, retain, todo_objc_setter,
++    ClassExports, HostObject, NSZonePtr,
+ };
+ 
+ struct NSDateFormatterHostObject {
+     date_format: Option<id>,
++    locale: id,
+ }
+ impl HostObject for NSDateFormatterHostObject {}
++
++// Numeric Unicode date fields and English day periods, as used by Violet.
++// Text month/day names, calendars and timezone formatting remain unsupported.
++fn format_gregorian_date(pattern: &str, date: CFGregorianDate) -> Result<String, String> {
++    let mut result = String::new();
++    let mut chars = pattern.chars().peekable();
++    let mut quoted = false;
++    while let Some(ch) = chars.next() {
++        if ch == '\'' {
++            if chars.peek() == Some(&'\'') {
++                chars.next();
++                result.push('\'');
++            } else {
++                quoted = !quoted;
++            }
++            continue;
++        }
++        if quoted || !ch.is_ascii_alphabetic() {
++            result.push(ch);
++            continue;
++        }
++        let mut width = 1;
++        while chars.peek() == Some(&ch) {
++            chars.next();
++            width += 1;
++        }
++        let value: i32 = match ch {
++            // YYYY preserves the old formatter's calendar-year approximation.
++            // A true week-based year requires calendar/week rule support.
++            'y' | 'Y' => {
++                if width == 2 {
++                    date.year.rem_euclid(100)
++                } else {
++                    date.year
++                }
++            }
++            'M' if width <= 2 => date.month.into(),
++            'd' if width <= 2 => date.day.into(),
++            'H' if width <= 2 => date.hours.into(),
++            'h' if width <= 2 => {
++                let hour = date.hours as i32 % 12;
++                if hour == 0 {
++                    12
++                } else {
++                    hour
++                }
++            }
++            'm' if width <= 2 => date.minutes.into(),
++            's' if width <= 2 => date.seconds.floor() as i32,
++            'a' => {
++                result.push_str(if date.hours < 12 { "AM" } else { "PM" });
++                continue;
++            }
++            _ => {
++                return Err(format!(
++                    "unsupported date field {}",
++                    ch.to_string().repeat(width)
++                ))
++            }
++        };
++        result.push_str(&format!("{value:0width$}"));
++    }
++    if quoted {
++        return Err("unterminated date-format literal".to_string());
++    }
++    Ok(result)
++}
+ 
+ pub const CLASSES: ClassExports = objc_classes! {
+ 
+@@ -29,13 +98,41 @@
+ + (id)allocWithZone:(NSZonePtr)_zone {
+     let host_object = Box::new(NSDateFormatterHostObject {
+         date_format: None,
++        locale: nil,
+     });
+     env.objc.alloc_object(this, host_object, &mut env.mem)
+ }
+ 
+ - (())setDateFormat:(id)format { // NSString *
+     let date_format: id = msg![env; format copy];
+-    env.objc.borrow_mut::<NSDateFormatterHostObject>(this).date_format = Some(date_format);
++    let previous = env.objc.borrow_mut::<NSDateFormatterHostObject>(this).date_format.replace(date_format);
++    if let Some(previous) = previous {
++        release(env, previous);
++    }
++}
++
++- (())setLocale:(id)locale {
++    retain(env, locale);
++    let previous = std::mem::replace(&mut env.objc.borrow_mut::<NSDateFormatterHostObject>(this).locale, locale);
++    release(env, previous);
++}
++
++- (id)locale {
++    let locale = env.objc.borrow::<NSDateFormatterHostObject>(this).locale;
++    if locale == nil {
++        msg_class![env; NSLocale currentLocale]
++    } else {
++        locale
++    }
++}
++
++- (())dealloc {
++    let &NSDateFormatterHostObject { date_format, locale } = env.objc.borrow(this);
++    if let Some(date_format) = date_format {
++        release(env, date_format);
++    }
++    release(env, locale);
++    env.objc.dealloc_object(this, &mut env.mem)
+ }
+ 
+ - (())setTimeZone:(id)time_zone {
+@@ -44,34 +141,14 @@
+ 
+ - (id)stringFromDate:(id)date {
+     let &NSDateFormatterHostObject {
+-        date_format
++        date_format, ..
+     } = env.objc.borrow(this);
+-    let mut format = ns_string::to_rust_string(env, date_format.unwrap()).to_string().clone();
+-    log_dbg!("date_format before: {:?}", format);
+-
++    let pattern = ns_string::to_rust_string(env, date_format.unwrap()).into_owned();
++    log!("NSDateFormatter format: {:?}", pattern);
+     let ti: NSTimeInterval = msg![env; date timeIntervalSinceReferenceDate];
+     let greg_date = CFAbsoluteTimeGetGregorianDate(env, ti, nil);
+-    let year = greg_date.year;
+-    let month = greg_date.month;
+-    let day = greg_date.day;
+-    let hour = greg_date.hours;
+-    let minute = greg_date.minutes;
+-    let second = greg_date.seconds;
+-
+-    format = format.replace("yyyy", format!("{year:04}").as_str());
+-    format = format.replace("YYYY", format!("{year:04}").as_str());
+-    format = format.replace("MM", format!("{month:02}").as_str());
+-    format = format.replace("dd", format!("{day:02}").as_str());
+-    format = format.replace("HH", format!("{hour:02}").as_str());
+-    format = format.replace("mm", format!("{minute:02}").as_str());
+-    format = format.replace("ss", format!("{second:02}").as_str());
+-
+-    for c in format.chars() {
+-        if let pattern @ ('A'..='Z' | 'a'..='z') = c {
+-            unimplemented!("date string contains unsubstituted format pattern: {pattern}");
+-        }
+-    }
+-    log_dbg!("date_format after: {:?}", format);
++    let format = format_gregorian_date(&pattern, greg_date)
++        .unwrap_or_else(|error| panic!("NSDateFormatter: {error}"));
+ 
+     let res = ns_string::from_rust_string(env, format);
+     autorelease(env, res)
+@@ -80,3 +157,42 @@
+ @end
+ 
+ };
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn numeric_date_patterns_and_literals() {
++        let date = CFGregorianDate {
++            year: 2026,
++            month: 10,
++            day: 18,
++            hours: 0,
++            minutes: 5,
++            seconds: 9.75,
++        };
++        assert_eq!(
++            format_gregorian_date("yyyy-MM-dd hh:mm:ss a", date).unwrap(),
++            "2026-10-18 12:05:09 AM"
++        );
++        assert_eq!(
++            format_gregorian_date("yy/M/d H:m:s", date).unwrap(),
++            "26/10/18 0:5:9"
++        );
++        assert_eq!(
++            format_gregorian_date("yyyy-MM-dd'T'HH:mm:ss", date).unwrap(),
++            "2026-10-18T00:05:09"
++        );
++        assert_eq!(
++            format_gregorian_date("'at' h 'o''clock'", date).unwrap(),
++            "at 12 o'clock"
++        );
++        for (hours, expected) in [(1, "01 AM"), (12, "12 PM"), (13, "01 PM"), (23, "11 PM")] {
++            let date = CFGregorianDate { hours, ..date };
++            assert_eq!(format_gregorian_date("hh a", date).unwrap(), expected);
++        }
++        assert!(format_gregorian_date("MMMM", date).is_err());
++        assert!(format_gregorian_date("'unclosed", date).is_err());
++    }
++}
+--- a/src/frameworks/core_animation/ca_layer.rs
++++ b/src/frameworks/core_animation/ca_layer.rs
+@@ -17,7 +17,9 @@
+ use crate::frameworks::core_graphics::cg_color::{CGColorHostObject, CGColorRef};
+ use crate::frameworks::core_graphics::cg_color_space::CGColorSpaceCreateDeviceRGB;
+ use crate::frameworks::core_graphics::cg_context::{
+-    CGContextClearRect, CGContextRef, CGContextRelease, CGContextTranslateCTM,
++    CGContextClearRect, CGContextConcatCTM, CGContextDrawImage, CGContextFillRect,
++    CGContextRef, CGContextRelease, CGContextRestoreGState, CGContextSaveGState,
++    CGContextSetRGBFillColor, CGContextTranslateCTM,
+ };
+ use crate::frameworks::core_graphics::cg_image::{
+     kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big,
+@@ -488,6 +490,46 @@
+     CGContextTranslateCTM(env, cg_context, origin.x, origin.y);
+ }
+ 
++// Render the model layer into the caller's context. In particular, UIKit
++// delegates must draw into that context rather than into a throwaway texture.
++// TODO: clipping, rounded corners, group opacity, and presentation-layer state.
++- (())renderInContext:(CGContextRef)context {
++    let layer = env.objc.borrow::<CALayerHostObject>(this).clone();
++    if layer.hidden || layer.opacity <= 0.0 {
++        return;
++    }
++    CGContextSaveGState(env, context);
++    if let Some(color) = layer.background_color {
++        CGContextSetRGBFillColor(env, context, color.r, color.g, color.b, color.a);
++        CGContextFillRect(env, context, layer.bounds);
++    }
++    let delegate_class = if layer.delegate != nil {
++        Some(ObjC::read_isa(layer.delegate, &env.mem))
++    } else {
++        None
++    };
++    if delegate_class.is_some_and(|class| env.objc.class_has_method_named(class, "displayLayer:")) {
++        () = msg![env; (layer.delegate) displayLayer:this];
++    }
++    let contents = env.objc.borrow::<CALayerHostObject>(this).contents;
++    if contents != nil {
++        CGContextDrawImage(env, context, layer.bounds, contents);
++    } else if delegate_class.is_some_and(|class| env.objc.class_has_method_named(class, "drawLayer:inContext:")) {
++        CGContextSaveGState(env, context);
++        () = msg![env; (layer.delegate) drawLayer:this inContext:context];
++        CGContextRestoreGState(env, context);
++    }
++    for sublayer in layer.sublayers {
++        let transform = env.objc.borrow::<CALayerHostObject>(sublayer)
++            .superlayer_to_layer_transform();
++        CGContextSaveGState(env, context);
++        CGContextConcatCTM(env, context, transform);
++        () = msg![env; sublayer renderInContext:context];
++        CGContextRestoreGState(env, context);
++    }
++    CGContextRestoreGState(env, context);
++}
++
+ // CGImageRef*
+ - (id)contents {
+     env.objc.borrow::<CALayerHostObject>(this).contents
+--- a/src/frameworks/core_graphics/cg_context.rs
++++ b/src/frameworks/core_graphics/cg_context.rs
+@@ -268,7 +268,7 @@
+     cg_bitmap_context::draw_image(env, context, rect, image);
+ }
+ 
+-fn CGContextSaveGState(env: &mut Environment, context: CGContextRef) {
++pub fn CGContextSaveGState(env: &mut Environment, context: CGContextRef) {
+     let host_obj = env.objc.borrow_mut::<CGContextHostObject>(context);
+     host_obj.state_stack.push((
+         host_obj.rgb_fill_color,
+@@ -280,7 +280,7 @@
+     CGFontRetain(env, env.objc.borrow::<CGContextHostObject>(context).font);
+ }
+ 
+-fn CGContextRestoreGState(env: &mut Environment, context: CGContextRef) {
++pub fn CGContextRestoreGState(env: &mut Environment, context: CGContextRef) {
+     // We need to release _old_ font, there are 2 cases:
+     // - font hasn't been set between save/restore -> this release corresponds
+     // the font retain from save

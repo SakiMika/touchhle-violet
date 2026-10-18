@@ -79,6 +79,7 @@ jobs:
           $env:CMAKE = "$env:GITHUB_WORKSPACE\vendor\cmake\bin\cmake.exe"
           & $env:CMAKE --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CARGO_PROFILE_RELEASE_DEBUG = "1"
           cargo build --release --locked --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -92,6 +93,11 @@ jobs:
           cp ../VIOLET_BUILD_README_VI.md touchHLE_windows_bundle/
           cp ../VENDORED_DEPENDENCIES.txt touchHLE_windows_bundle/
           cp ../ragnarok-violet-uigraphics.patch touchHLE_windows_bundle/
+          cp ../ragnarok-violet-v2.patch touchHLE_windows_bundle/
+          cp ../VIOLET_PATCH_VERSION.txt ../VIOLET_V2_TEST_REPORT.txt touchHLE_windows_bundle/
+          if [[ -f ../target/x86_64-pc-windows-msvc/release/touchHLE.pdb ]]; then
+            cp ../target/x86_64-pc-windows-msvc/release/touchHLE.pdb touchHLE_windows_bundle/
+          fi
 
       - name: Upload Windows build
         uses: actions/upload-artifact@v4

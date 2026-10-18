@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 
 #[macro_export]
+macro_rules! log { ($($arg:tt)*) => { eprintln!($($arg)*); }; }
+#[macro_export]
 macro_rules! export_c_func {
     ($name:ident($($arg:tt)*)) => { stringify!($name) };
 }
@@ -31,7 +33,7 @@ mod mem {
 }
 mod frameworks {
     pub mod core_graphics {
-        #[derive(Clone, Copy)]
+        #[derive(Clone, Copy, Debug)]
         pub struct CGSize { pub width: f32, pub height: f32 }
         pub mod cg_context {
             use crate::Environment;

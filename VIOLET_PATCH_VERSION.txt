@@ -1,0 +1,3 @@
+Violet experimental patch V2
+Base upstream: ca1de89c578e79746f33c1332e28efd106c334ba
+Linux-tested through opening in-game scene; Windows validation pending.

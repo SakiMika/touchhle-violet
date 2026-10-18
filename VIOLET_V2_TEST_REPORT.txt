@@ -1,0 +1,30 @@
+VIOLET EXPERIMENTAL PATCH V2 — TEST REPORT
+
+Host: Linux x86_64, Rust 1.99.1, debug build.
+Build: cargo build --locked — PASS.
+Production crate tests: cargo test --locked --lib — 33 passed.
+Standalone ui_graphics test-double harness — 7 passed.
+
+Runtime: user-supplied com.neocyon.violetjp 1.0 IPA; ARMv7 selected.
+Mesa software OpenGL, Xvfb, --gles1=gles1_on_gl2, --preferred-languages=en.
+Default direct-memory-access enabled for final New Game test.
+OpenAL null audio driver: audio quality was NOT tested.
+Observed: title -> menu -> New Game -> save slot -> introduction -> opening
+in-game house scene with sprites and dialogue, without a panic up to that point.
+No full-game, prolonged stability, combat, save/load, or Windows validation.
+The timed local process is not a completed playthrough.
+
+Reproduced and addressed during Linux startup/New Game:
+- NSLocale assertion for en_US identifier.
+- Missing NSDateFormatter setLocale:.
+- Unsupported hh date format.
+- Missing CALayer renderInContext:.
+Prior fix: UIGraphicsBeginImageContext and companion APIs.
+
+Windows native access violation 0xC0000005 is NOT reproduced or proven fixed.
+Windows event-log attachment contained no matching Application Error event.
+No Windows executable or successful GitHub Actions run is included as evidence.
+Known upstream Objective-C reference-count warnings remain.
+
+See VIOLET_BUILD_README_VI.md for implementation limits and build instructions.
+No proprietary IPA, game resources, or sandbox save data are distributed here.

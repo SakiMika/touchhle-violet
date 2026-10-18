@@ -1,9 +1,10 @@
-# Source touchHLE đã vá API UIGraphics cho Ragnarok Violet
+# Source touchHLE — bản vá thử nghiệm Ragnarok Violet V2
 
 ## Gói này có gì?
 
 - Source touchHLE tại revision `ca1de89c578e79746f33c1332e28efd106c334ba`.
-- Đã áp dụng bản vá trong `src/frameworks/uikit/ui_graphics.rs`.
+- Đã áp dụng các bản vá UIGraphics, NSLocale, NSDateFormatter và CALayer.
+- File `VIOLET_PATCH_VERSION.txt` đánh dấu gói V2.
 - Đã kèm source bốn dependency native: SDL, dynarmic, openal-soft và stb,
   ở đúng revision upstream yêu cầu. Xem `VENDORED_DEPENDENCIES.txt`.
 - Dependency native được đưa vào dạng file/thư mục thông thường để tạo repo mới.
@@ -71,22 +72,45 @@ re-run lần cũ có thể vẫn sử dụng nội dung workflow cũ.
 
 Nếu build đỏ, mở bước bị lỗi và gửi log hoặc Download log archive để kiểm tra.
 
-## Phạm vi bản vá và kiểm chứng
+## Cập nhật repo đã có từ gói V1
 
-Log gốc báo `Call to unimplemented function _UIGraphicsBeginImageContext`.
-Bản vá bổ sung UIGraphicsBeginImageContext, UIGraphicsGetImageFromCurrentImageContext
-và UIGraphicsEndImageContext bằng bitmap thật, có giữ/nhả bộ nhớ và context lồng nhau.
-Không cần áp dụng lại file patch: mã nguồn trong gói ĐÃ ĐƯỢC VÁ.
+Nếu repo được tạo từ gói full source V1, giải nén gói UPDATE V2 và chép toàn bộ
+nội dung vào GỐC repo, cho phép ghi đè, rồi commit và push. Không chép file ZIP
+nguyên vào repo, không chạy git apply: file patch chỉ để xem thay đổi vì source
+đã được vá sẵn. Gói UPDATE không dành cho checkout upstream bất kỳ.
 
-Bảy bài test độc lập đã qua trên Linux với test doubles cho Core Graphics/
-Objective-C. Test này không thay thế full cargo test, renderer thật hoặc chạy game.
-Workflow cũng chạy lại bảy test đó trước khi build executable trên Windows.
+Nếu tạo repo mới, dùng gói FULL SOURCE V2, không chỉ dùng gói UPDATE.
+Workflow vẫn tên `Build Violet Windows`; phải tạo lần chạy MỚI sau khi push.
+Artifact chứa `VIOLET_PATCH_VERSION.txt` ghi `Violet experimental patch V2`.
 
-Chưa chạy workflow này thực tế trên GitHub, chưa có Windows binary được xác minh,
-chưa chạy lại game do chưa có IPA. Build thành công không chứng minh game không
-còn crash: các API thiếu hoặc lỗi vẽ khác có thể xuất hiện tiếp. Chưa sửa giới hạn
-UIImage/renderer sẵn có, chưa hỗ trợ UIGraphicsBeginImageContextWithOptions,
-context stack vẫn dùng state chung như source ban đầu.
+## Phạm vi bản vá và kiểm chứng V2
+
+- UIGraphics: context RGBA8 thật, snapshot ảnh, context lồng nhau và giữ/nhả bộ nhớ.
+- NSLocale: nhận identifier như en_US thay vì assert chỉ cho mã hai ký tự;
+  phân tách ngôn ngữ/vùng, giữ identifier gốc và sửa hằng LanguageCode.
+- NSDateFormatter: thêm setLocale:/locale và định dạng số, bao gồm giờ 12h `hh`.
+- CALayer: thêm renderInContext: để vẽ nền, contents, delegate UIKit và sublayers
+  vào context; không phải stub bỏ qua lời gọi. Giữ/khôi phục graphics state.
+- Workflow build chính source repo hiện tại, không checkout SHA của repo khác.
+  Build release kèm debug info và chép PDB nếu compiler tạo ra, giúp chẩn đoán
+  native crash khi cần.
+
+Đã biên dịch bản debug Linux và chạy IPA người dùng cung cấp bằng Mesa software
+OpenGL + gles1_on_gl2: qua title, menu, chọn New Game/slot, đoạn giới thiệu và
+vào cảnh mở đầu trong nhà với nhân vật/hội thoại. Đây không phải kiểm thử toàn game.
+Đã chạy 33 unit test thật (`cargo test --locked --lib`) và 7 test độc lập của bản vá,
+đều đạt. Xem `VIOLET_V2_TEST_REPORT.txt`.
+
+CHƯA chạy GitHub Actions/Windows binary thực tế. Lỗi Windows native
+0xC0000005 chưa được tái hiện trên Linux; không khẳng định V2 đã sửa lỗi đó.
+Không xác nhận âm thanh: máy thử dùng OpenAL null backend. Vẫn có cảnh báo
+Objective-C reference count và các API TODO của upstream.
+
+Giới hạn: CALayer chưa xử lý group opacity, clipping, rounded corners hoặc
+presentation layer; NSDateFormatter chưa hỗ trợ đầy đủ locale/calendar/timezone
+và tên tháng/ngày. NSLocale chỉ phân tách identifier thông dụng, không phải ICU.
+UIGraphics chưa có BeginImageContextWithOptions, stack chưa tách theo thread,
+các giới hạn UIImage/renderer khác vẫn tồn tại. Hãy sao lưu save trước khi thử.
 
 Đây là bản sửa thử nghiệm có hỗ trợ AI cho repo riêng, không phải bản release
 chính thức. CONTRIBUTING.md của upstream cấm đóng góp mã tạo bằng AI;

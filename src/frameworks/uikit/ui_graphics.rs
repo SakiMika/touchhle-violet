@@ -79,6 +79,7 @@ fn image_context_dimensions(size: CGSize) -> Option<(GuestUSize, GuestUSize, Gue
 }
 
 pub fn UIGraphicsBeginImageContext(env: &mut Environment, size: CGSize) {
+    log!("UIGraphicsBeginImageContext({:?})", size);
     // The legacy API uses scale 1.0 and a transparent RGBA bitmap.
     let (width, height, bytes_per_row) = image_context_dimensions(size)
         .expect("UIGraphicsBeginImageContext: invalid or oversized bitmap dimensions");

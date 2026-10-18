@@ -17,7 +17,9 @@ use crate::frameworks::core_graphics::cg_bitmap_context::{
 use crate::frameworks::core_graphics::cg_color::{CGColorHostObject, CGColorRef};
 use crate::frameworks::core_graphics::cg_color_space::CGColorSpaceCreateDeviceRGB;
 use crate::frameworks::core_graphics::cg_context::{
-    CGContextClearRect, CGContextRef, CGContextRelease, CGContextTranslateCTM,
+    CGContextClearRect, CGContextConcatCTM, CGContextDrawImage, CGContextFillRect,
+    CGContextRef, CGContextRelease, CGContextRestoreGState, CGContextSaveGState,
+    CGContextSetRGBFillColor, CGContextTranslateCTM,
 };
 use crate::frameworks::core_graphics::cg_image::{
     kCGImageAlphaPremultipliedLast, kCGImageByteOrder32Big,
@@ -486,6 +488,46 @@ pub const CLASSES: ClassExports = objc_classes! {
     CGContextClearRect(env, cg_context, CGRect { origin, size });
     () = msg![env; delegate drawLayer:this inContext:cg_context];
     CGContextTranslateCTM(env, cg_context, origin.x, origin.y);
+}
+
+// Render the model layer into the caller's context. In particular, UIKit
+// delegates must draw into that context rather than into a throwaway texture.
+// TODO: clipping, rounded corners, group opacity, and presentation-layer state.
+- (())renderInContext:(CGContextRef)context {
+    let layer = env.objc.borrow::<CALayerHostObject>(this).clone();
+    if layer.hidden || layer.opacity <= 0.0 {
+        return;
+    }
+    CGContextSaveGState(env, context);
+    if let Some(color) = layer.background_color {
+        CGContextSetRGBFillColor(env, context, color.r, color.g, color.b, color.a);
+        CGContextFillRect(env, context, layer.bounds);
+    }
+    let delegate_class = if layer.delegate != nil {
+        Some(ObjC::read_isa(layer.delegate, &env.mem))
+    } else {
+        None
+    };
+    if delegate_class.is_some_and(|class| env.objc.class_has_method_named(class, "displayLayer:")) {
+        () = msg![env; (layer.delegate) displayLayer:this];
+    }
+    let contents = env.objc.borrow::<CALayerHostObject>(this).contents;
+    if contents != nil {
+        CGContextDrawImage(env, context, layer.bounds, contents);
+    } else if delegate_class.is_some_and(|class| env.objc.class_has_method_named(class, "drawLayer:inContext:")) {
+        CGContextSaveGState(env, context);
+        () = msg![env; (layer.delegate) drawLayer:this inContext:context];
+        CGContextRestoreGState(env, context);
+    }
+    for sublayer in layer.sublayers {
+        let transform = env.objc.borrow::<CALayerHostObject>(sublayer)
+            .superlayer_to_layer_transform();
+        CGContextSaveGState(env, context);
+        CGContextConcatCTM(env, context, transform);
+        () = msg![env; sublayer renderInContext:context];
+        CGContextRestoreGState(env, context);
+    }
+    CGContextRestoreGState(env, context);
 }
 
 // CGImageRef*
